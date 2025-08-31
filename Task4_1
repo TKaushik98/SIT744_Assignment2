@@ -1,0 +1,114 @@
+# ============================================================
+# Task 4.1 – Layer Rotation Experiment (TensorFlow/Keras, CIFAR-10)
+# Final Stable Version
+# ============================================================
+
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import matplotlib.pyplot as plt
+
+# ---------------------------
+# 1) CIFAR-10 Dataset
+# ---------------------------
+(X_train, y_train), (X_test, y_test) = tf.keras.datasets.cifar10.load_data()
+
+# Normalize images to [-1, 1]
+X_train = (X_train.astype("float32") / 255.0) * 2 - 1
+X_test  = (X_test.astype("float32")  / 255.0) * 2 - 1
+
+y_train = y_train.flatten()
+y_test  = y_test.flatten()
+
+# ---------------------------
+# 2) Define CNN model
+# ---------------------------
+def build_cnn():
+    inp = layers.Input(shape=(32,32,3))
+    x = layers.Conv2D(32, (3,3), activation="relu", padding="same", name="conv1")(inp)
+    x = layers.MaxPooling2D((2,2))(x)
+    x = layers.Conv2D(64, (3,3), activation="relu", padding="same", name="conv2")(x)
+    x = layers.MaxPooling2D((2,2))(x)
+    x = layers.Flatten()(x)
+    x = layers.Dense(256, activation="relu", name="fc1")(x)
+    out = layers.Dense(10, activation="softmax", name="fc2")(x)
+    return models.Model(inp, out, name="RotationCNN")
+
+model = build_cnn()
+model.summary()
+
+# ---------------------------
+# 3) Training setup
+# ---------------------------
+loss_fn = tf.keras.losses.SparseCategoricalCrossentropy()
+optimizer = tf.keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
+
+train_acc_history = []
+
+# Track per-weight (kernel only) rotations
+layer_rotations = {w.name: [] for w in model.weights if "kernel" in w.name}
+prev_weights = {w.name: tf.identity(w) for w in model.weights if "kernel" in w.name}
+
+# ---------------------------
+# 4) Custom training loop
+# ---------------------------
+epochs = 5
+batch_size = 128
+train_ds = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(50000).batch(batch_size)
+
+for epoch in range(epochs):
+    correct, total = 0, 0
+    for x_batch, y_batch in train_ds:
+        with tf.GradientTape() as tape:
+            logits = model(x_batch, training=True)
+            loss = loss_fn(y_batch, logits)
+        grads = tape.gradient(loss, model.trainable_weights)
+        optimizer.apply_gradients(zip(grads, model.trainable_weights))
+
+        # ---- Training accuracy ----
+        y_batch_int = tf.cast(y_batch, tf.int64)
+        preds = tf.argmax(logits, axis=1, output_type=tf.int64)
+        correct += tf.reduce_sum(tf.cast(preds == y_batch_int, tf.int32)).numpy()
+        total   += y_batch.shape[0]
+
+    acc = correct / total
+    train_acc_history.append(acc)
+
+    # ---- Layer rotation tracking ----
+    for w in model.weights:
+        if "kernel" in w.name:
+            vec_prev = tf.reshape(prev_weights[w.name], [-1])
+            vec_new  = tf.reshape(w, [-1])
+
+            # Ensure same length (avoid mismatch)
+            min_len = min(vec_prev.shape[0], vec_new.shape[0])
+            vec_prev = vec_prev[:min_len]
+            vec_new  = vec_new[:min_len]
+
+            # Normalize & cosine sim
+            vec_prev = vec_prev / (tf.norm(vec_prev) + 1e-8)
+            vec_new  = vec_new  / (tf.norm(vec_new) + 1e-8)
+            cos = tf.reduce_sum(vec_prev * vec_new)
+
+            layer_rotations[w.name].append(float(cos.numpy()))
+
+            # Update prev
+            prev_weights[w.name] = tf.identity(w)
+
+    print(f"Epoch {epoch+1}/{epochs} | Train Acc: {acc:.3f}")
+
+# ---------------------------
+# 5) Plot results
+# ---------------------------
+plt.figure(figsize=(10,5))
+for wname, rots in layer_rotations.items():
+    plt.plot(rots, label=wname.split("/")[0])  # show only layer name
+plt.xlabel("Epoch"); plt.ylabel("Cosine similarity")
+plt.title("Layer rotation across training (TensorFlow)")
+plt.legend(); plt.show()
+
+plt.figure()
+plt.plot(train_acc_history, label="Train Accuracy")
+plt.xlabel("Epoch"); plt.ylabel("Accuracy")
+plt.title("Training Accuracy")
+plt.legend(); plt.show()
